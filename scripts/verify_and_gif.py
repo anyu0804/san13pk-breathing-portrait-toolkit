@@ -11,6 +11,7 @@
   python verify_and_gif.py --prefix sample --dir sample_breathing --chest-line 465
 """
 import argparse
+import json
 import os
 import struct
 
@@ -69,6 +70,19 @@ def render_frame(chest, waist, head, chest_line, phase, background=(70, 70, 70, 
     return Image.alpha_composite(canvas, shifted)
 
 
+def alpha_deficit(source_alpha, frame_alpha, threshold):
+    """只检查原图接近不透明的主体；返回坐标为画布像素，bbox 两端均包含。"""
+    mask = (source_alpha >= threshold) & (frame_alpha < threshold)
+    ys, xs = np.where(mask)
+    rows = np.count_nonzero(mask, axis=1)
+    return {
+        'pixels': int(len(ys)),
+        'min_alpha': int(frame_alpha[mask].min()) if len(ys) else None,
+        'bbox': [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())] if len(ys) else None,
+        'rows': [[int(y), int(rows[y])] for y in np.flatnonzero(rows)],
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--prefix', required=True, help='generate_breathing.py 输出的文件名前缀')
@@ -76,10 +90,19 @@ def main():
     ap.add_argument('--chest-line', type=int, required=True, help='胸线 y 坐标（缩放锚点，与生成时一致）')
     ap.add_argument('--frames', type=int, default=16, help='GIF 帧数（默认 16）')
     ap.add_argument('--duration', type=int, default=90, help='每帧毫秒（默认 90）')
-    ap.add_argument('--source', help='可选原图：输出真实 over 静态差异与接缝诊断')
+    ap.add_argument('--source', help='可选原图：逐相位透明度缺口检查及静态差异')
+    ap.add_argument('--alpha-threshold', type=int, default=250, help='主体/缺口 alpha 分界，默认 250')
+    ap.add_argument('--warn-pixels', type=int, default=0, help='缺口像素数超过此值时警告，默认 0')
     args = ap.parse_args()
     if args.frames < 2 or args.duration <= 0 or not 0 < args.chest_line < 1024:
         ap.error('需要 frames >= 2、duration > 0、0 < chest-line < 1024')
+    if not 1 <= args.alpha_threshold <= 255 or args.warn_pixels < 0:
+        ap.error('需要 1 <= alpha-threshold <= 255、warn-pixels >= 0')
+    source = None
+    if args.source:
+        source = Image.open(args.source).convert('RGBA')
+        if source.size != (1024, 1024):
+            ap.error('--source 必须是生成时的 1024x1024 原图')
 
     layers = {}
     for tag in ['chest', 'waist', 'head']:
@@ -96,9 +119,23 @@ def main():
     # 生成模拟呼吸 GIF
     chest, waist, head = layers['chest'], layers['waist'], layers['head']
     frames = []
+    metrics = []
     for i in range(args.frames):
         t = i / args.frames * 2 * np.pi
-        frames.append(render_frame(chest, waist, head, args.chest_line, t))
+        frame = render_frame(chest, waist, head, args.chest_line, t, (0, 0, 0, 0))
+        bg = Image.new('RGBA', frame.size, (70, 70, 70, 255))
+        frames.append(Image.alpha_composite(bg, frame))
+        if source is not None:
+            deficit = alpha_deficit(np.asarray(source)[:, :, 3], np.asarray(frame)[:, :, 3], args.alpha_threshold)
+            metrics.append({'frame': i, 'phase_radians': float(t), **deficit})
+            print('相位 %d/%d: alpha<%d 缺口=%d 最低=%s bbox=%s%s' % (
+                i, args.frames, args.alpha_threshold, deficit['pixels'], deficit['min_alpha'],
+                deficit['bbox'], ' WARNING' if deficit['pixels'] > args.warn_pixels else ''))
+    if source is not None:
+        report = {'alpha_threshold': args.alpha_threshold, 'warn_pixels': args.warn_pixels,
+                  'region': 'source alpha >= threshold; original canvas coordinates', 'frames': metrics}
+        with open(os.path.join(args.dir, args.prefix + '_alpha_phases.json'), 'w', encoding='utf-8') as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
 
     # 保存无调色板量化的关键帧；透明帧和黑白底能暴露 alpha 缺口/重影
     panels = []
@@ -112,10 +149,7 @@ def main():
     for i, panel in enumerate(panels):
         sheet.paste(panel, ((i % 2) * 256, (i // 2) * 256))
     sheet.save(os.path.join(args.dir, args.prefix + '_seams.png'))
-    if args.source:
-        source = Image.open(args.source).convert('RGBA')
-        if source.size != (1024, 1024):
-            ap.error('--source 必须是生成时的 1024x1024 原图')
+    if source is not None:
         static = render_frame(chest, waist, head, args.chest_line, 0, (0, 0, 0, 0))
         diff = np.abs(np.array(static).astype(int) - np.array(source).astype(int))
         print('静态 over alpha 差异 max=%d mean=%.3f；仅诊断，不是游戏 PASS' % (

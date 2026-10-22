@@ -10,10 +10,36 @@ from PIL import Image
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'scripts'))
 from generate_breathing import feather_factor, save_bmp_alpha, split_layers
 from pick_lines import pick
-from verify_and_gif import load_bmp_rgba, read_bmp_header, render_frame
+from verify_and_gif import alpha_deficit, load_bmp_rgba, read_bmp_header, render_frame
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'examples'))
+from make_sample_portrait import make_portrait
 
 
 class PortraitRegressionTests(unittest.TestCase):
+    def test_stable_leg_line_avoids_skirt_seam_at_every_phase(self):
+        source = np.array(make_portrait())
+        rows = (source[:, :, 3] > 40).sum(axis=1).astype(float)
+        sm = np.convolve(rows, np.ones(15) / 15, mode='same')
+        chest, leg = pick(sm, 70, 1023)
+        self.assertLess(leg, 770)
+        layers = split_layers(source, chest, leg, 7, 20)
+        old_layers = split_layers(source, chest, 798, 7, 20)
+        old = np.array(render_frame(*old_layers, chest, 1.5 * np.pi, (0, 0, 0, 0)))
+        old_metric = alpha_deficit(source[760:811, :, 3], old[760:811, :, 3], 250)
+        self.assertGreater(old_metric['pixels'], 1500)
+        for i in range(16):
+            frame = np.array(render_frame(*layers, chest, i / 16 * 2 * np.pi, (0, 0, 0, 0)))
+            metric = alpha_deficit(source[760:811, :, 3], frame[760:811, :, 3], 250)
+            self.assertEqual(metric['pixels'], 0, 'phase %d' % i)
+
+    def test_alpha_deficit_reports_canvas_locations_and_ignores_soft_source(self):
+        source = np.array([[255, 100], [255, 255]], dtype=np.uint8)
+        frame = np.array([[127, 0], [255, 249]], dtype=np.uint8)
+        self.assertEqual(alpha_deficit(source, frame, 250), {
+            'pixels': 2, 'min_alpha': 127, 'bbox': [0, 0, 1, 1], 'rows': [[0, 1], [1, 1]]})
+        self.assertEqual(alpha_deficit(source, source, 250), {
+            'pixels': 0, 'min_alpha': None, 'bbox': None, 'rows': []})
+
     def test_zero_feather_is_hard_cut_without_nan(self):
         with np.errstate(all='raise'):
             np.testing.assert_array_equal(feather_factor(5, 2, 0, True), [0, 0, 1, 1, 1])

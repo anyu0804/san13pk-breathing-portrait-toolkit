@@ -2,7 +2,7 @@
 """按透明度轮廓自动建议呼吸图的胸线/腿线位置。
 
 原理：对逐行非透明像素计数并平滑，在躯干范围内找"最窄行"作胸线
-（约身体 20%~35%，颈到上胸候选区），找腿线（约 62%~80%）。
+（约身体 20%~35%，颈到上胸候选区），腿线在 62%~80% 找局部宽度变化最平稳的位置。
 建议值仅供起步，务必对照 <prefix>_lines_preview.png 人工确认。
 
 用法：
@@ -37,10 +37,15 @@ def pick(sm, top, bot):
     lo, hi = top + 0.20 * H, top + 0.35 * H
     seg = sm[int(lo):int(hi) + 1]
     chest = int(lo) + int(np.argmin(seg))
-    # 腿线：范围 62%-80%；不用固定 40px 间距，短主体也有非空区间
+    # 默认 20px 羽化带及其邻域应避开裙摆宽度骤变处；不再找最窄行。
     lo2, hi2 = max(chest + 1, int(top + 0.62 * H)), max(chest + 1, int(top + 0.80 * H))
-    seg2 = sm[int(lo2):int(hi2) + 1]
-    leg = int(lo2) + int(np.argmin(seg2))
+    window = min(41, H + 1)
+    variation = np.convolve(np.abs(np.gradient(sm)), np.ones(window) / window, mode='same')
+    widths = sm[lo2:hi2 + 1]
+    scores = variation[lo2:hi2 + 1].copy()
+    # 裙摆下方的细腿也很平稳；限定在候选区较宽的主体内，避免再次选到下摆外。
+    scores[widths < 0.8 * widths.max()] = np.inf
+    leg = lo2 + int(np.argmin(scores))
     return chest, leg
 
 
