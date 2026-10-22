@@ -24,7 +24,7 @@ def read_bmp_header(path):
     with open(path, 'rb') as f:
         d = f.read(BMP_HEADER_SIZE)
     if len(d) < BMP_HEADER_SIZE:
-        return None
+        raise ValueError('BMP 文件头不足 54 字节: ' + path)
     sig = d[0:2]
     fs = struct.unpack_from('<I', d, 2)[0]
     off = struct.unpack_from('<I', d, 10)[0]
@@ -34,7 +34,10 @@ def read_bmp_header(path):
     bpp = struct.unpack_from('<H', d, 28)[0]
     comp = struct.unpack_from('<I', d, 30)[0]
     ok = (sig == b'BM' and off == BMP_HEADER_SIZE and dib == 40 and bpp == 32
-          and comp == 0 and abs(w) == abs(h) and fs == BMP_HEADER_SIZE + abs(w) * abs(h) * 4)
+          and comp == 0 and w == 1024 and abs(h) == 1024
+          and fs == BMP_HEADER_SIZE + w * abs(h) * 4 and fs == os.path.getsize(path))
+    if not ok:
+        raise ValueError('需要完整的 1024x1024、32 位 BI_RGB BMP: ' + path)
     return ok, w, h, fs
 
 
@@ -52,6 +55,20 @@ def load_bmp_rgba(path):
     return arr[:, :, [2, 1, 0, 3]].copy()  # BGRA -> RGBA
 
 
+def render_frame(chest, waist, head, chest_line, phase, background=(70, 70, 70, 255)):
+    """模拟帧：逆向采样缩放，Pillow source-over 保留羽化透明度。"""
+    hh, ww = chest.shape[:2]
+    dy = int(round(2 * np.sin(phase)))
+    scale = 1.0 + 0.010 * np.sin(phase)
+    src_y = np.clip(np.round(chest_line + (np.arange(hh) - chest_line) / scale), 0, hh - 1).astype(int)
+    canvas = Image.new('RGBA', (ww, hh), background)
+    canvas = Image.alpha_composite(canvas, Image.fromarray(chest[src_y]))
+    canvas = Image.alpha_composite(canvas, Image.fromarray(waist))
+    shifted = Image.new('RGBA', (ww, hh))
+    shifted.paste(Image.fromarray(head), (0, -dy))
+    return Image.alpha_composite(canvas, shifted)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--prefix', required=True, help='generate_breathing.py 输出的文件名前缀')
@@ -59,12 +76,18 @@ def main():
     ap.add_argument('--chest-line', type=int, required=True, help='胸线 y 坐标（缩放锚点，与生成时一致）')
     ap.add_argument('--frames', type=int, default=16, help='GIF 帧数（默认 16）')
     ap.add_argument('--duration', type=int, default=90, help='每帧毫秒（默认 90）')
+    ap.add_argument('--source', help='可选原图：输出真实 over 静态差异与接缝诊断')
     args = ap.parse_args()
+    if args.frames < 2 or args.duration <= 0 or not 0 < args.chest_line < 1024:
+        ap.error('需要 frames >= 2、duration > 0、0 < chest-line < 1024')
 
     layers = {}
     for tag in ['chest', 'waist', 'head']:
         p = os.path.join(args.dir, '%s_%s.bmp' % (args.prefix, tag))
-        ok, w, h, fs = read_bmp_header(p)
+        try:
+            ok, w, h, fs = read_bmp_header(p)
+        except (OSError, ValueError) as exc:
+            ap.error(str(exc))
         rgba = load_bmp_rgba(p)
         nz = int((rgba[:, :, 3] > 0).sum())
         print('%s: 格式OK=%s 尺寸=%dx%d 文件长=%d 非透明像素=%d' % (tag, ok, w, h, fs, nz))
@@ -72,33 +95,32 @@ def main():
 
     # 生成模拟呼吸 GIF
     chest, waist, head = layers['chest'], layers['waist'], layers['head']
-    hh, ww = chest.shape[:2]
-    bg = np.array([70, 70, 70, 255], dtype=np.uint8)
     frames = []
     for i in range(args.frames):
         t = i / args.frames * 2 * np.pi
-        dy = int(round(2 * np.sin(t)))
-        scale = 1.0 + 0.010 * np.sin(t)
-        canvas = np.tile(bg, (hh, ww, 1))
-        # 胸：以胸线为锚点垂直缩放
-        src_ys = np.arange(hh)
-        new_ys = np.clip(np.round(args.chest_line + (src_ys - args.chest_line) * scale), 0, hh - 1).astype(int)
-        for yy in range(hh):
-            sy = new_ys[yy]
-            m = chest[sy, :, 3] > 0
-            if m.any():
-                canvas[yy, m] = chest[sy, m]
-        # 腰（静态，覆盖腿）
-        m = waist[:, :, 3] > 0
-        canvas[m] = waist[m]
-        # 头（上下移动）
-        target = np.zeros_like(canvas)
-        sy0, sy1 = max(0, dy), min(hh, hh + dy)
-        ty0, ty1 = max(0, -dy), min(hh, hh - dy)
-        target[ty0:ty1, :, :] = head[sy0:sy1, :, :]
-        m = target[:, :, 3] > 0
-        canvas[m] = target[m]
-        frames.append(Image.fromarray(canvas, 'RGBA'))
+        frames.append(render_frame(chest, waist, head, args.chest_line, t))
+
+    # 保存无调色板量化的关键帧；透明帧和黑白底能暴露 alpha 缺口/重影
+    panels = []
+    for i, phase in enumerate((0, np.pi / 2, np.pi, 3 * np.pi / 2)):
+        frame = render_frame(chest, waist, head, args.chest_line, phase, (0, 0, 0, 0))
+        frame.save(os.path.join(args.dir, '%s_frame_%d.png' % (args.prefix, i)))
+        for color in ('black', 'white'):
+            bg = Image.new('RGBA', frame.size, color)
+            panels.append(Image.alpha_composite(bg, frame).resize((256, 256)))
+    sheet = Image.new('RGB', (512, 1024))
+    for i, panel in enumerate(panels):
+        sheet.paste(panel, ((i % 2) * 256, (i // 2) * 256))
+    sheet.save(os.path.join(args.dir, args.prefix + '_seams.png'))
+    if args.source:
+        source = Image.open(args.source).convert('RGBA')
+        if source.size != (1024, 1024):
+            ap.error('--source 必须是生成时的 1024x1024 原图')
+        static = render_frame(chest, waist, head, args.chest_line, 0, (0, 0, 0, 0))
+        diff = np.abs(np.array(static).astype(int) - np.array(source).astype(int))
+        print('静态 over alpha 差异 max=%d mean=%.3f；仅诊断，不是游戏 PASS' % (
+            diff[:, :, 3].max(), diff[:, :, 3].mean()))
+        Image.fromarray(diff.astype(np.uint8)).save(os.path.join(args.dir, args.prefix + '_static_diff.png'))
 
     gif_path = os.path.join(args.dir, '%s_breathing_preview.gif' % args.prefix)
     frames[0].save(gif_path, save_all=True, append_images=frames[1:], duration=args.duration, loop=0, disposal=2)

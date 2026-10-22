@@ -1,107 +1,86 @@
 #target photoshop
 
-// 三国志13PK 呼吸图自动制作脚本（Photoshop 备选路径）
-// 输入: 1024x1024 带透明通道的全身立绘 PNG
-// 输出: 三张 32位带 Alpha 的 BMP（chest=全身 / waist=腿以下 / head=头到胸口）+ 底图 PSD
-//
-// 用法：把下方 CONFIG 块改成自己的路径和线位（可用 pick_lines.py 建议值），
-// 在 Photoshop 里 File > Scripts > Browse... 运行本文件。
-// 默认 Python 脚本（scripts/generate_breathing.py）不需要 Photoshop，殊途同归。
+// 实验性矩形分层；PS 高斯羽化与 Python 单向线性羽化不同。
+// 必须输入 1024x1024 透明 PNG；不会拉伸、移动或覆盖原文件。
+var SRC = "C:/path/to/portrait.png";
+var OUT_BASE = "C:/path/to/out/portrait";
+var CHEST_LINE = 465;
+var LEG_LINE = 658;
+var FEATHER_WAIST = 20;
+var FEATHER_HEAD = 7;
 
-// ===== CONFIG（按需修改） =====
-var SRC = "C:/path/to/portrait.png";      // 源图 PNG
-var OUT_BASE = "C:/path/to/out/portrait"; // 输出前缀（不带扩展名）
-var CHEST_LINE = 465;                     // 胸线 y（0 在顶部）
-var LEG_LINE = 658;                       // 腿线 y
-var FEATHER_WAIST = 20;                   // 腰层上缘羽化 px
-var FEATHER_HEAD = 7;                     // 头层下缘羽化 px
-// =============================
-
-var LOG_FILE = OUT_BASE + "_log.txt";
-
-function log(msg) {
-    var f = new File(LOG_FILE);
-    f.open("a");
-    f.writeln(msg);
-    f.close();
-}
-
-function selectLayerTransparency() {
-    var idSlct = charIDToTypeID("slct");
-    var d = new ActionDescriptor();
-    d.putEnumerated(charIDToTypeID("Chnl"), charIDToTypeID("Chnl"), charIDToTypeID("Trsp"));
-    executeAction(idSlct, d, DialogModes.NO);
-}
-
-function rebuildAlpha1() {
-    // 先把已有 Alpha 1 删掉，再根据当前图层透明区域重建
-    try {
-        var ch = doc.channels["Alpha 1"];
-        if (ch) ch.remove();
-    } catch (e) {}
-    selectLayerTransparency();
-    var newCh = doc.channels.add();
-    try { newCh.name = "Alpha 1"; } catch (e) {}
-    doc.selection.deselect();
-}
-
-function saveBmp(path) {
-    var f = new File(path);
-    if (f.exists) f.remove();
-    var opts = new BMPSaveOptions();
-    opts.alphaChannels = true;
-    opts.OS = OperatingSystem.WINDOWS;
-    try { opts.depth = BitsPerChannelType.THIRTYTWO; } catch (e) {
-        try { opts.depth = 32; } catch (e2) {}
+function rebuildAlpha1(doc) {
+    // PNG 副本只保留 RGB 和当前透明度生成的 Alpha，避免保存陈旧通道。
+    for (var i = doc.channels.length - 1; i >= 0; i--) {
+        if (doc.channels[i].kind != ChannelType.COMPONENT) doc.channels[i].remove();
     }
-    doc.saveAs(f, opts, true, Extension.LOWERCASE);
-    log("saved " + path);
+    var d = new ActionDescriptor();
+    var selection = new ActionReference();
+    selection.putProperty(charIDToTypeID("Chnl"), charIDToTypeID("fsel"));
+    d.putReference(charIDToTypeID("null"), selection);
+    var transparency = new ActionReference();
+    transparency.putEnumerated(charIDToTypeID("Chnl"), charIDToTypeID("Chnl"), charIDToTypeID("Trsp"));
+    d.putReference(charIDToTypeID("T   "), transparency);
+    executeAction(charIDToTypeID("setd"), d, DialogModes.NO);
+    var alpha = doc.channels.add();
+    alpha.name = "Alpha 1";
+    doc.selection.store(alpha, SelectionType.REPLACE);
+    doc.selection.deselect();
+    doc.activeChannels = [doc.channels[0], doc.channels[1], doc.channels[2]];
 }
 
-function cutRect(x1, y1, x2, y2, featherPx) {
-    doc.selection.deselect();
-    doc.selection.select([x1, y1, x2, y2], SelectionType.REPLACE, 0, false);
+function cutRect(doc, x1, y1, x2, y2, featherPx) {
+    doc.selection.select([[x1,y1], [x2,y1], [x2,y2], [x1,y2]], SelectionType.REPLACE, 0, false);
     if (featherPx > 0) doc.selection.feather(featherPx);
     doc.selection.clear();
     doc.selection.deselect();
 }
 
-app.displayDialogs = DialogModes.NO;
-try {
-    var f0 = new File(LOG_FILE);
-    if (f0.exists) f0.remove();
-} catch (e) {}
-
-var src = new File(SRC);
-var doc = open(src);
-if (!doc) {
-    log("ERROR 无法打开源图: " + SRC);
-    throw new Error("无法打开源图");
+function exportLayer(source, tag) {
+    var doc = source.duplicate(tag);
+    try {
+        if (tag == "chest") {
+            cutRect(doc, 0, 0, 1024, CHEST_LINE, FEATHER_HEAD);
+            cutRect(doc, 0, LEG_LINE, 1024, 1024, FEATHER_WAIST);
+        } else if (tag == "waist") {
+            cutRect(doc, 0, 0, 1024, LEG_LINE, FEATHER_WAIST);
+        } else {
+            cutRect(doc, 0, CHEST_LINE, 1024, 1024, FEATHER_HEAD);
+        }
+        rebuildAlpha1(doc);
+        var opts = new BMPSaveOptions();
+        opts.alphaChannels = true;
+        opts.OS = OperatingSystem.WINDOWS;
+        opts.depth = BMPDepthType.THIRTYTWO;
+        opts.rleCompression = false;
+        doc.saveAs(new File(OUT_BASE + "_" + tag + ".bmp"), opts, true, Extension.LOWERCASE);
+    } finally {
+        doc.close(SaveOptions.DONOTSAVECHANGES);
+    }
 }
 
-// 确保 1024x1024（源图应为 1024x1024，若尺寸不同则缩放并居中）
-var W = doc.width.value, H = doc.height.value;
-if (W != 1024 || H != 1024) {
-    doc.resizeImage(1024, 1024, null, ResampleMethod.BICUBIC);
+function main() {
+    if (!(0 < CHEST_LINE && CHEST_LINE < LEG_LINE && LEG_LINE < 1024)
+        || FEATHER_WAIST < 0 || FEATHER_HEAD < 0) {
+        throw new Error("需要 0 < 胸线 < 腿线 < 1024；羽化宽度 >= 0");
+    }
+    var dialogs = app.displayDialogs;
+    app.displayDialogs = DialogModes.NO;
+    try {
+        var source = app.open(new File(SRC));
+        try {
+            if (source.width.as("px") != 1024 || source.height.as("px") != 1024) {
+                throw new Error("输入必须是 1024x1024；请先按比例缩放并排版到透明画布");
+            }
+            source.saveAs(new File(OUT_BASE + "_base.psd"), new PhotoshopSaveOptions(), true, Extension.LOWERCASE);
+            exportLayer(source, "chest");
+            exportLayer(source, "waist");
+            exportLayer(source, "head");
+        } finally {
+            source.close(SaveOptions.DONOTSAVECHANGES);
+        }
+    } finally {
+        app.displayDialogs = dialogs;
+    }
 }
-
-rebuildAlpha1();
-saveBmp(OUT_BASE + "_chest.bmp");
-
-// 底图 PSD（方便以后手动调整线位）
-var psdPath = OUT_BASE + "_base.psd";
-var psdFile = new File(psdPath);
-if (psdFile.exists) psdFile.remove();
-doc.saveAs(psdFile, new PhotoshopSaveOptions(), true, Extension.LOWERCASE);
-
-// 腰图: 保留腿线以下，上方羽化
-cutRect(0, 0, 1024, LEG_LINE, FEATHER_WAIST);
-rebuildAlpha1();
-saveBmp(OUT_BASE + "_waist.bmp");
-
-// 头图: 保留胸线以上，下方羽化
-cutRect(0, CHEST_LINE, 1024, 1024, FEATHER_HEAD);
-rebuildAlpha1();
-saveBmp(OUT_BASE + "_head.bmp");
-
-log("DONE");
+main();

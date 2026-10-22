@@ -1,4 +1,5 @@
 __pycache__/
+.test-tmp/
 *.pyc
 # 示例与产出的图片不入库
 examples/sample_portrait*.png

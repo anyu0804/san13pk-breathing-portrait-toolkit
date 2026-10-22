@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """三国志13PK 呼吸图生成：把 1024x1024 透明全身立绘切成胸/腰/头三层羽化 BMP。
 
-游戏的三层呼吸立绘约定（见 README）：
-  chest 胸层 = 完整原图，呼吸动画中绕胸线做垂直缩放；
+实验性矩形分层（尚未用原生纹理校准，见 README）：
+  chest 胸层 = 胸线到腿线的躯干，上下向外羽化；
   waist 腰层 = 只保留腿线以下（上方羽化过渡），作为静态下层；
   head  头层 = 只保留胸线以上（下方羽化过渡），动画中整体上下小幅移动。
 
@@ -28,8 +28,10 @@ FEATHER_CHEST_DEFAULT = 7  # 头层下缘羽化像素
 
 
 def feather_factor(h, line, feather, keep_below):
-    """返回每行的 alpha 缩放系数（模拟 PS 羽化选区后删除）"""
+    """返回每行的单向线性 alpha 系数，不等同于 PS 高斯羽化。"""
     y = np.arange(h, dtype=float)
+    if feather == 0:
+        return (y >= line if keep_below else y <= line).astype(float)
     if keep_below:
         # 保留腿线以下；上方羽化
         f = np.ones(h)
@@ -71,6 +73,16 @@ def alpha_apply(rgba, factor):
     return out
 
 
+def split_layers(rgba, chest, leg, feather_chest, feather_leg):
+    """共用 RGB，仅分配 alpha；输出为待人工检查的候选层。"""
+    h = rgba.shape[0]
+    torso = (feather_factor(h, chest, feather_chest, True)
+             * feather_factor(h, leg, feather_leg, False))
+    return (alpha_apply(rgba, torso),
+            alpha_apply(rgba, feather_factor(h, leg, feather_leg, True)),
+            alpha_apply(rgba, feather_factor(h, chest, feather_chest, False)))
+
+
 def resolve_lines(args, stem):
     """--chest/--leg 优先；否则从 --lines JSON 里按文件名主干取建议值。"""
     if args.chest is not None and args.leg is not None:
@@ -96,6 +108,8 @@ def main():
     ap.add_argument('--feather-leg', type=int, default=FEATHER_LEG_DEFAULT, help='腰层上缘羽化像素（默认 %d）' % FEATHER_LEG_DEFAULT)
     ap.add_argument('--feather-chest', type=int, default=FEATHER_CHEST_DEFAULT, help='头层下缘羽化像素（默认 %d）' % FEATHER_CHEST_DEFAULT)
     args = ap.parse_args()
+    if args.feather_leg < 0 or args.feather_chest < 0:
+        ap.error('羽化宽度必须 >= 0；0 表示硬切')
 
     stem = os.path.splitext(os.path.basename(args.input))[0]
     prefix = args.prefix if args.prefix else stem
@@ -112,9 +126,8 @@ def main():
     out_dir = args.out if args.out else os.path.join(os.path.dirname(os.path.abspath(args.input)), stem + '_breathing')
     os.makedirs(out_dir, exist_ok=True)
 
-    chest_img = rgba.copy()
-    waist_img = alpha_apply(rgba, feather_factor(h, leg, args.feather_leg, True))
-    head_img = alpha_apply(rgba, feather_factor(h, chest, args.feather_chest, False))
+    chest_img, waist_img, head_img = split_layers(
+        rgba, chest, leg, args.feather_chest, args.feather_leg)
 
     save_bmp_alpha(os.path.join(out_dir, prefix + '_chest.bmp'), chest_img)
     save_bmp_alpha(os.path.join(out_dir, prefix + '_waist.bmp'), waist_img)
@@ -133,11 +146,7 @@ def main():
     draw_line(prev, leg, [0, 100, 255, 255])
     Image.fromarray(prev, 'RGBA').save(os.path.join(out_dir, prefix + '_lines_preview.png'))
 
-    # 叠加验证：三张图 alpha 取最大，应等于原 alpha（羽化区内允许更小）
-    a_orig = rgba[:, :, 3]
-    a_comb = np.maximum.reduce([chest_img[:, :, 3], waist_img[:, :, 3], head_img[:, :, 3]])
-    diff = np.abs(a_orig.astype(int) - a_comb.astype(int))
-    print('%s: 三图合成后与原透明通道最大差异 %d, 平均差异 %.3f' % (prefix, diff.max(), diff.mean()))
+    print('%s: 实验性分层；请用 verify_and_gif.py 检查动态接缝，不代表游戏验收' % prefix)
     for tag, arr in [('chest', chest_img), ('waist', waist_img), ('head', head_img)]:
         nz = int((arr[:, :, 3] > 0).sum())
         print('  %s: 非透明像素 %d (%.1f%%)' % (tag, nz, 100.0 * nz / (GAME_SIZE * GAME_SIZE)))
