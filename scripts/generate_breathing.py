@@ -90,10 +90,12 @@ def resolve_lines(args, stem):
     if args.lines:
         with open(args.lines, 'r', encoding='utf-8') as f:
             cfg = json.load(f)
-        key = args.prefix if args.prefix else stem
+        key = stem
         if key not in cfg:
             raise SystemExit('lines JSON 中没有 %r 的记录；可用键：%s' % (key, ', '.join(cfg)))
-        return int(cfg[key]['chest_line']), int(cfg[key]['leg_line'])
+        chest = args.chest if args.chest is not None else int(cfg[key]['chest_line'])
+        leg = args.leg if args.leg is not None else int(cfg[key]['leg_line'])
+        return chest, leg
     raise SystemExit('需要 --chest/--leg，或提供 pick_lines.py 生成的 --lines JSON')
 
 
@@ -155,3 +157,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

@@ -12,6 +12,8 @@ import os
 
 from PIL import Image
 
+from verify_and_gif import load_bmp_rgba, read_bmp_header
+
 BACKGROUNDS = {
     'gray': (70, 70, 70, 255),
     'white': (255, 255, 255, 255),
@@ -29,7 +31,11 @@ def main():
     out_dir = args.out if args.out else os.path.join(os.path.dirname(os.path.abspath(args.input)), stem + '_preview')
     os.makedirs(out_dir, exist_ok=True)
 
-    im = Image.open(args.input).convert('RGBA')
+    if os.path.splitext(args.input)[1].lower() == '.bmp':
+        read_bmp_header(args.input)
+        im = Image.fromarray(load_bmp_rgba(args.input))
+    else:
+        im = Image.open(args.input).convert('RGBA')
     for name, color in BACKGROUNDS.items():
         bg = Image.new('RGBA', im.size, color)
         bg.alpha_composite(im)
@@ -40,3 +46,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

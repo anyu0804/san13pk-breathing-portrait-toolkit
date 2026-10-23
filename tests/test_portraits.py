@@ -1,14 +1,20 @@
 import pathlib
+import contextlib
+import io
+import json
 import struct
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'scripts'))
-from generate_breathing import feather_factor, save_bmp_alpha, split_layers
+from generate_breathing import feather_factor, resolve_lines, save_bmp_alpha, split_layers
+from make_preview import BACKGROUNDS, main as preview_main
 from pick_lines import pick
 from verify_and_gif import alpha_deficit, load_bmp_rgba, read_bmp_header, render_frame
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'examples'))
@@ -16,6 +22,41 @@ from make_sample_portrait import make_portrait
 
 
 class PortraitRegressionTests(unittest.TestCase):
+    def test_json_lines_allow_independent_manual_overrides_and_output_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / 'lines.json'
+            path.write_text(json.dumps({'portrait': {'chest_line': 300, 'leg_line': 700}}))
+            for chest, leg, expected in [(None, None, (300, 700)), (400, None, (400, 700)),
+                                          (None, 650, (300, 650)), (400, 650, (400, 650))]:
+                with self.subTest(chest=chest, leg=leg):
+                    args = SimpleNamespace(chest=chest, leg=leg, prefix='renamed', lines=str(path))
+                    self.assertEqual(resolve_lines(args, 'portrait'), expected)
+
+    def test_preview_cli_preserves_bmp_and_png_transparency(self):
+        rgba = np.zeros((1024, 1024, 4), dtype=np.uint8)
+        rgba[:, :, :3] = [200, 10, 20]
+        rgba[10, 10, 3] = 128
+        rgba[20, 20, 3] = 255
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            bmp = root / 'portrait.BMP'
+            png = root / 'portrait.png'
+            save_bmp_alpha(str(bmp), rgba)
+            Image.fromarray(rgba).save(png)
+            for source in (bmp, png):
+                out = root / source.suffix[1:]
+                with patch.object(sys, 'argv', ['make_preview.py', str(source), '--out', str(out)]), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    preview_main()
+                for name, color in BACKGROUNDS.items():
+                    with Image.open(out / ('portrait_on_%s.png' % name)) as preview:
+                        self.assertEqual(preview.getpixel((0, 0)), color[:3])
+                        expected = Image.alpha_composite(
+                            Image.new('RGBA', (1, 1), color),
+                            Image.new('RGBA', (1, 1), (200, 10, 20, 128))).getpixel((0, 0))[:3]
+                        self.assertEqual(preview.getpixel((10, 10)), expected)
+                        self.assertEqual(preview.getpixel((20, 20)), (200, 10, 20))
+
     def test_stable_leg_line_avoids_skirt_seam_at_every_phase(self):
         source = np.array(make_portrait())
         rows = (source[:, :, 3] > 40).sum(axis=1).astype(float)
@@ -92,3 +133,4 @@ class PortraitRegressionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
