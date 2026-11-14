@@ -5,10 +5,12 @@
 文件长度自洽），并统计各层非透明像素。
 预览：胸层绕胸线做 ±1% 垂直缩放、头层上下 ±2px 浮动、腰层静止，近似游戏
 内的呼吸合成方式，叠到灰底上便于肉眼检查接缝。预览只能证明素材效果，
-不等于游戏运行验收。
+不等于游戏运行验收。绘制顺序是假设：base 模型为 腰(底图)→胸→头，
+legacy 模型为 胸→腰→头。
 
 用法：
   python verify_and_gif.py --prefix sample --dir sample_breathing --chest-line 465
+  python verify_and_gif.py --prefix sample --dir sample_breathing --chest-line 465 --model legacy
 """
 import argparse
 import json
@@ -56,15 +58,19 @@ def load_bmp_rgba(path):
     return arr[:, :, [2, 1, 0, 3]].copy()  # BGRA -> RGBA
 
 
-def render_frame(chest, waist, head, chest_line, phase, background=(70, 70, 70, 255)):
-    """模拟帧：逆向采样缩放，Pillow source-over 保留羽化透明度。"""
+def render_frame(chest, waist, head, chest_line, phase, background=(70, 70, 70, 255), base_first=False):
+    """模拟帧：逆向采样缩放，Pillow source-over 保留羽化透明度。
+
+    base_first=True 时腰层作为底图最先绘制（base 模型），否则胸层在腰层之下（legacy）。
+    """
     hh, ww = chest.shape[:2]
     dy = int(round(2 * np.sin(phase)))
     scale = 1.0 + 0.010 * np.sin(phase)
     src_y = np.clip(np.round(chest_line + (np.arange(hh) - chest_line) / scale), 0, hh - 1).astype(int)
     canvas = Image.new('RGBA', (ww, hh), background)
-    canvas = Image.alpha_composite(canvas, Image.fromarray(chest[src_y]))
-    canvas = Image.alpha_composite(canvas, Image.fromarray(waist))
+    order = (waist, chest[src_y]) if base_first else (chest[src_y], waist)
+    for layer in order:
+        canvas = Image.alpha_composite(canvas, Image.fromarray(layer))
     shifted = Image.new('RGBA', (ww, hh))
     shifted.paste(Image.fromarray(head), (0, -dy))
     return Image.alpha_composite(canvas, shifted)
@@ -93,6 +99,8 @@ def main():
     ap.add_argument('--source', help='可选原图：逐相位透明度缺口检查及静态差异')
     ap.add_argument('--alpha-threshold', type=int, default=250, help='主体/缺口 alpha 分界，默认 250')
     ap.add_argument('--warn-pixels', type=int, default=0, help='缺口像素数超过此值时警告，默认 0')
+    ap.add_argument('--model', choices=('base', 'legacy'), default='base',
+                    help='与生成时一致：base=腰层底图先画（默认），legacy=胸层先画')
     args = ap.parse_args()
     if args.frames < 2 or args.duration <= 0 or not 0 < args.chest_line < 1024:
         ap.error('需要 frames >= 2、duration > 0、0 < chest-line < 1024')
@@ -118,11 +126,12 @@ def main():
 
     # 生成模拟呼吸 GIF
     chest, waist, head = layers['chest'], layers['waist'], layers['head']
+    base_first = args.model == 'base'
     frames = []
     metrics = []
     for i in range(args.frames):
         t = i / args.frames * 2 * np.pi
-        frame = render_frame(chest, waist, head, args.chest_line, t, (0, 0, 0, 0))
+        frame = render_frame(chest, waist, head, args.chest_line, t, (0, 0, 0, 0), base_first)
         bg = Image.new('RGBA', frame.size, (70, 70, 70, 255))
         frames.append(Image.alpha_composite(bg, frame))
         if source is not None:
@@ -133,6 +142,7 @@ def main():
                 deficit['bbox'], ' WARNING' if deficit['pixels'] > args.warn_pixels else ''))
     if source is not None:
         report = {'alpha_threshold': args.alpha_threshold, 'warn_pixels': args.warn_pixels,
+                  'model': args.model,
                   'region': 'source alpha >= threshold; original canvas coordinates', 'frames': metrics}
         with open(os.path.join(args.dir, args.prefix + '_alpha_phases.json'), 'w', encoding='utf-8') as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
@@ -140,7 +150,7 @@ def main():
     # 保存无调色板量化的关键帧；透明帧和黑白底能暴露 alpha 缺口/重影
     panels = []
     for i, phase in enumerate((0, np.pi / 2, np.pi, 3 * np.pi / 2)):
-        frame = render_frame(chest, waist, head, args.chest_line, phase, (0, 0, 0, 0))
+        frame = render_frame(chest, waist, head, args.chest_line, phase, (0, 0, 0, 0), base_first)
         frame.save(os.path.join(args.dir, '%s_frame_%d.png' % (args.prefix, i)))
         for color in ('black', 'white'):
             bg = Image.new('RGBA', frame.size, color)
@@ -150,7 +160,7 @@ def main():
         sheet.paste(panel, ((i % 2) * 256, (i // 2) * 256))
     sheet.save(os.path.join(args.dir, args.prefix + '_seams.png'))
     if source is not None:
-        static = render_frame(chest, waist, head, args.chest_line, 0, (0, 0, 0, 0))
+        static = render_frame(chest, waist, head, args.chest_line, 0, (0, 0, 0, 0), base_first)
         diff = np.abs(np.array(static).astype(int) - np.array(source).astype(int))
         print('静态 over alpha 差异 max=%d mean=%.3f；仅诊断，不是游戏 PASS' % (
             diff[:, :, 3].max(), diff[:, :, 3].mean()))
