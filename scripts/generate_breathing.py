@@ -1,15 +1,22 @@
 # -*- coding: utf-8 -*-
 """三国志13PK 呼吸图生成：把 1024x1024 透明全身立绘切成胸/腰/头三层羽化 BMP。
 
-实验性矩形分层（尚未用原生纹理校准，见 README）：
-  chest 胸层 = 胸线到腿线的躯干，上下向外羽化；
-  waist 腰层 = 只保留腿线以下（上方羽化过渡），作为静态下层；
-  head  头层 = 只保留胸线以上（下方羽化过渡），动画中整体上下小幅移动。
+两种分层模型（均未用原生纹理逐像素校准，见 README）：
+
+  base（默认，按 2016 年社区对光荣原生遮罩的描述）：
+    waist 腰层 = 底图：胸线以下整个身体（下半身、手臂、脖子下段和未处理的胸部），
+                 上缘羽化，静止且最先绘制，上方层怎么动都不会露空；
+    chest 胸层 = 胸线到腿线的躯干，下缘向外扩 --overlap 像素作重叠羽化区（上缘不外扩，
+                 避免带进会移动的头部），叠在底图上缩放；
+    head  头层 = 胸线以上，下缘羽化，上下小幅移动。
+  legacy（旧模型）：
+    chest 胸层 = 胸线到腿线的躯干；waist 腰层 = 只保留腿线以下；head 头层 = 胸线以上。
 
 用法：
   python generate_breathing.py 输入.png --chest 465 --leg 658
   python generate_breathing.py 输入.png --lines lines.json        # 用 pick_lines.py 的建议值
   python generate_breathing.py 输入.png --chest 465 --leg 658 --out 输出目录 --prefix 角色ID
+  python generate_breathing.py 输入.png --lines lines.json --model legacy  # 旧模型
 
 输出（均为 32 位 BGRA、无压缩、BI_RGB BMP，1024x1024）：
   <prefix>_chest.bmp / <prefix>_waist.bmp / <prefix>_head.bmp / <prefix>_lines_preview.png
@@ -23,8 +30,10 @@ import numpy as np
 from PIL import Image
 
 GAME_SIZE = 1024          # 游戏呼吸图纹理画布，宽高必须一致
-FEATHER_LEG_DEFAULT = 20  # 腰层上缘羽化像素
-FEATHER_CHEST_DEFAULT = 7  # 头层下缘羽化像素
+FEATHER_LEG_DEFAULT = 20  # legacy：腰层上缘羽化像素
+FEATHER_CHEST_DEFAULT = 7  # 头层下缘（base 模型中也是底图上缘）羽化像素
+OVERLAP_DEFAULT = 30      # base：胸层下缘外扩的重叠羽化宽度（社区描述“约 30 像素”）
+MODELS = ('base', 'legacy')
 
 
 def feather_factor(h, line, feather, keep_below):
@@ -73,14 +82,29 @@ def alpha_apply(rgba, factor):
     return out
 
 
-def split_layers(rgba, chest, leg, feather_chest, feather_leg):
-    """共用 RGB，仅分配 alpha；输出为待人工检查的候选层。"""
+def split_layers(rgba, chest, leg, feather_chest, feather_leg, model='base', overlap=OVERLAP_DEFAULT):
+    """共用 RGB，仅分配 alpha；按 (chest, waist, head) 顺序返回待人工检查的候选层。
+
+    base 模型下 feather_leg 不使用：胸层下缘向腿线外扩 overlap 作重叠羽化，
+    上缘与底图一样只用 feather_chest。
+    """
+    if model not in MODELS:
+        raise ValueError('未知分层模型: %r' % (model,))
     h = rgba.shape[0]
+    head = alpha_apply(rgba, feather_factor(h, chest, feather_chest, False))
+    if model == 'legacy':
+        torso = (feather_factor(h, chest, feather_chest, True)
+                 * feather_factor(h, leg, feather_leg, False))
+        return (alpha_apply(rgba, torso),
+                alpha_apply(rgba, feather_factor(h, leg, feather_leg, True)),
+                head)
+    if overlap < 0:
+        raise ValueError('overlap 必须 >= 0')
+    # 上缘只用 feather_chest：再往上就是会移动的头部，外扩过多会留下下巴/头部残影
     torso = (feather_factor(h, chest, feather_chest, True)
-             * feather_factor(h, leg, feather_leg, False))
-    return (alpha_apply(rgba, torso),
-            alpha_apply(rgba, feather_factor(h, leg, feather_leg, True)),
-            alpha_apply(rgba, feather_factor(h, chest, feather_chest, False)))
+             * feather_factor(h, leg, overlap, False))
+    base = feather_factor(h, chest, feather_chest, True)
+    return alpha_apply(rgba, torso), alpha_apply(rgba, base), head
 
 
 def resolve_lines(args, stem):
@@ -107,11 +131,15 @@ def main():
     ap.add_argument('--lines', help='pick_lines.py 输出的 JSON，代替 --chest/--leg')
     ap.add_argument('--out', help='输出目录（默认：输入旁的 <输入名>_breathing/）')
     ap.add_argument('--prefix', help='输出文件名前缀（默认：输入文件名主干）')
-    ap.add_argument('--feather-leg', type=int, default=FEATHER_LEG_DEFAULT, help='腰层上缘羽化像素（默认 %d）' % FEATHER_LEG_DEFAULT)
-    ap.add_argument('--feather-chest', type=int, default=FEATHER_CHEST_DEFAULT, help='头层下缘羽化像素（默认 %d）' % FEATHER_CHEST_DEFAULT)
+    ap.add_argument('--model', choices=MODELS, default='base',
+                    help='分层模型：base=腰层作完整底图（默认），legacy=旧的三段切分')
+    ap.add_argument('--overlap', type=int, default=OVERLAP_DEFAULT,
+                    help='base：胸层下缘外扩的重叠羽化像素（默认 %d）' % OVERLAP_DEFAULT)
+    ap.add_argument('--feather-leg', type=int, default=FEATHER_LEG_DEFAULT, help='legacy：腰层上缘羽化像素（默认 %d）' % FEATHER_LEG_DEFAULT)
+    ap.add_argument('--feather-chest', type=int, default=FEATHER_CHEST_DEFAULT, help='头层下缘/底图上缘羽化像素（默认 %d）' % FEATHER_CHEST_DEFAULT)
     args = ap.parse_args()
-    if args.feather_leg < 0 or args.feather_chest < 0:
-        ap.error('羽化宽度必须 >= 0；0 表示硬切')
+    if args.feather_leg < 0 or args.feather_chest < 0 or args.overlap < 0:
+        ap.error('羽化/重叠宽度必须 >= 0；0 表示硬切')
 
     stem = os.path.splitext(os.path.basename(args.input))[0]
     prefix = args.prefix if args.prefix else stem
@@ -129,7 +157,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     chest_img, waist_img, head_img = split_layers(
-        rgba, chest, leg, args.feather_chest, args.feather_leg)
+        rgba, chest, leg, args.feather_chest, args.feather_leg, args.model, args.overlap)
 
     save_bmp_alpha(os.path.join(out_dir, prefix + '_chest.bmp'), chest_img)
     save_bmp_alpha(os.path.join(out_dir, prefix + '_waist.bmp'), waist_img)
@@ -148,7 +176,8 @@ def main():
     draw_line(prev, leg, [0, 100, 255, 255])
     Image.fromarray(prev, 'RGBA').save(os.path.join(out_dir, prefix + '_lines_preview.png'))
 
-    print('%s: 实验性分层；请用 verify_and_gif.py 检查动态接缝，不代表游戏验收' % prefix)
+    print('%s: 实验性分层（%s 模型）；请用 verify_and_gif.py --model %s 检查动态接缝，不代表游戏验收' % (
+        prefix, args.model, args.model))
     for tag, arr in [('chest', chest_img), ('waist', waist_img), ('head', head_img)]:
         nz = int((arr[:, :, 3] > 0).sum())
         print('  %s: 非透明像素 %d (%.1f%%)' % (tag, nz, 100.0 * nz / (GAME_SIZE * GAME_SIZE)))
