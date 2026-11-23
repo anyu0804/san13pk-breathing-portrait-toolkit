@@ -75,9 +75,19 @@ GIF 只是近似运动，不能代替原生图对照或游戏内验收。
 ## 原生图校准仍待完成
 
 当前水平矩形分层是启发式制作模型，不能视为已复刻原生遮罩。
-需要以来源明确、允许使用的原生三层样本核对覆盖范围、重叠区、肩颈曲线及画布位置，
-并通过游戏确认各层运动角色、合成顺序和引擎变换参数。
-这些校准和实机验收尚未完成。请勿向仓库上传官方原图、纹理像素或资源包。
+`scripts/measure_native.py` 用来先做本地实测校准：你自己用导入工具从数据块 8 导出几名武将的
+原生三连图（顺序为胸、腰、头；支持 32 位 BI_RGB/标准 BGRA 位域 BMP 和 PNG），在本地运行：
+
+```bash
+python scripts/measure_native.py 胸.bmp 腰.bmp 头.bmp --json native_alpha.json
+```
+
+它报告画布尺寸和主体范围（判断数值是按 1024 画布还是 633×900 有效区量的）、
+每层范围与上下渐变宽度、两两层的重叠行段、腰层与胸层各自对胸段主体的覆盖率
+（判断腰层是否为含手臂的完整底图、胸层是否只抠胸口局部），以及头层/胸层真实接缝列
+（剔除脸颊、耳朵等悬空外轮廓）的逐列高度离散度与中位羽化宽度，用于后续校准分层模型和默认参数。
+运动角色、合成顺序和引擎变换参数仍需在游戏里确认。
+请勿向仓库上传官方原图、纹理像素、导出结果或资源包。
 
 ## Photoshop 路径（不推荐，未实测）
 
@@ -98,7 +108,8 @@ python -m compileall -q scripts tests examples
 python -m unittest discover -s tests -v
 ```
 
-回归用例包括示例旧腿线第 12/16 相位缺口复现、新腿线全部 16 相位裙摆带检查、
+回归用例包括原生测量脚本回读、硬切零羽化、弧线接缝与悬空轮廓排除、位域/V4/截断 BMP 校验、
+示例旧腿线第 12/16 相位缺口复现、新腿线全部 16 相位裙摆带检查、
 透明度缺口定位、零羽化、胸层范围、半透明 over 合成、移动头部残影、短主体选线、
 BMP 回读及损坏文件。GitHub Actions 自动执行同一组用例；不覆盖 Photoshop 和游戏。
 
@@ -129,6 +140,8 @@ BMP 回读及损坏文件。GitHub Actions 自动执行同一组用例；不覆�
 
 Experimental SAN13PK portrait-layer generator using Python, NumPy and Pillow.
 Torso-only masks, alpha-over animation diagnostics and regression tests are provided.
+`measure_native.py` measures user-exported native trios to inspect layer coverage,
+seam geometry and feather widths before calibrating the layering model.
 Native alpha calibration and motion roles remain unverified.
 The Photoshop path is not recommended due to an untested RGB/white-fringe concern. In-game acceptance is not run.
 No game assets or third-party tools are distributed. MIT covers only licensable project content.
